@@ -1,0 +1,237 @@
+#!/bin/bash
+
+display_help() {
+    echo "Використання: $0 [--help | --version] | [[-q|--quiet] [академ_група] файл_із_cist.csv]"
+    echo ""
+    echo "Опції:"
+    echo "  --help              Вивести цю довідку"
+    echo "  --version           Вивести версію скрипта"
+    echo "  -q, --quiet         Не виводити дані у стандартний потік виведення"
+    echo ""
+    echo "Параметри:"
+    echo "  академ_група        Назва академічної групи (наприклад, ПЗПІ-23-12)"
+    echo "  файл_із_cist.csv    CSV-файл із розкладом занять"
+    exit 0
+}
+
+display_version() {
+    echo "Версія: 1.0"
+    exit 0
+}
+
+quiet=0
+group=""
+file=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --help)
+            display_help
+            ;;
+        --version)
+            display_version
+            ;;
+        -q|--quiet)
+            quiet=1
+            shift
+            ;;
+        *)
+            if [[ -z $group ]]; then
+                group=$1
+            elif [[ -z $file ]]; then
+                file=$1
+            else
+                echo "Помилка: забагато аргументів" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z $file ]]; then
+    files=$(ls TimeTable_??_??_20??.csv 2>/dev/null | sort)
+    if [[ -z $files ]]; then
+        echo "Помилка: у поточній директорії не знайдено файлів TimeTable_??_??_20??.csv" >&2
+        exit 1
+    fi
+    echo "Виберіть файл:"
+    select file in $files; do
+        if [[ -z $file ]]; then
+            echo "Помилка: некоректний вибір" >&2
+        else
+            break
+        fi
+    done
+fi
+
+if [[ -z $file ]]; then
+    echo "Помилка: файл не вказано" >&2
+    exit 1
+fi
+if [[ ! -r $file ]]; then
+    echo "Помилка: файл недоступний для читання: $file" >&2
+    exit 1
+fi
+
+temp_fixed=$(mktemp)
+iconv -f WINDOWS-1251 -t UTF-8 "$file" | tr -d '\r' > "$temp_fixed" || { 
+    echo "Помилка: не вдалося конвертувати кодування файлу" >&2
+    rm "$temp_fixed"
+    exit 1
+}
+
+groups=$(grep -o '"[^"]*DL [А-Яа-я0-9,-]\+[^"]*"' "$temp_fixed" | sed -E 's/.*DL ([А-Яа-я0-9,-]+).*$/\1/g' | grep -v ',' | sort | uniq)
+
+group_count=$(echo "$groups" | wc -l)
+
+if [[ $group_count -eq 0 ]]; then
+    echo "Помилка: у файлі не знайдено жодної групи" >&2
+    rm "$temp_fixed"
+    exit 1
+fi
+
+if [[ -z "$group" || -z $(echo "$groups" | grep -x "$group") ]]; then
+    if [[ $group_count -eq 1 ]]; then
+        group="$groups"
+        echo "Використовується єдина знайдена група: $group" >&2
+    else
+        if [[ -n "$group" ]]; then
+            echo "Помилка: вказана група '$group' не знайдена у файлі." >&2
+        fi
+        echo "Доступні групи:" >&2
+        echo "$groups" >&2
+        echo "Виберіть групу:"
+        select group in $groups; do
+            if [[ -z "$group" ]]; then
+                echo "Помилка: некоректний вибір" >&2
+            else
+                break
+            fi
+        done
+    fi
+fi
+
+date_part=$(echo "$file" | sed 's/TimeTable_\(.*\).csv/\1/')
+output_file="Google_TimeTable_${date_part}.csv"
+
+if [[ $quiet -eq 0 ]]; then
+    echo "Обробка записів для групи: $group"
+fi
+
+temp_filtered=$(mktemp)
+temp_sorted=$(mktemp)
+
+if [[ $group_count -eq 1 ]]; then
+    grep -o "\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\"" "$temp_fixed" > "$temp_filtered"
+else
+    grep -o "\"$group - [^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\",\"[^\"]*\"" "$temp_fixed" > "$temp_filtered"
+fi
+
+awk -F'"' '
+    $4 !~ /\/Дата\*\// && $2 !~ /Тема/ && $4 != "" {
+        split($4, date_parts, ".")
+        sort_date = sprintf("%04d%02d%02d", date_parts[3], date_parts[2], date_parts[1])
+        print sort_date "|" $6 "|" $0
+    }
+' "$temp_filtered" | sort > "$temp_sorted"
+
+echo "Subject,Start Date,Start Time,End Date,End Time,Description" > "$output_file"
+
+awk -F'|' '
+    function convert_to_12h(time_24h) {
+        split(time_24h, parts, ":")
+        hour = parts[1] + 0
+        minute = parts[2]
+        
+        if(hour == 0) {
+            hour = 12
+            ampm = "AM"
+        } else if(hour == 12) {
+            ampm = "PM"
+        } else if(hour > 12) {
+            hour = hour - 12
+            ampm = "PM"
+        } else {
+            ampm = "AM"
+        }
+        
+        return hour ":" minute " " ampm
+    }
+    
+    {
+        line = $3
+        split(line, fields, "\"")
+        
+        subject = fields[2]
+        start_date = fields[4]
+        start_time = fields[6]
+        end_date = fields[8]
+        end_time = fields[10]
+        
+        clean_subject = subject
+        gsub(/^[А-ЯІЇЄа-яіїє0-9-]+ - /, "", clean_subject)
+        
+        if(clean_subject ~ /Лб/) {
+            type = "Лб"
+            key_subject = clean_subject
+            gsub(/ DL.*/, "", key_subject)
+            key = key_subject "_" type "_" start_date
+        } else if(clean_subject ~ /Пз/) {
+            type = "Пз"
+            key_subject = clean_subject
+            gsub(/ DL.*/, "", key_subject)
+            key = key_subject "_" type
+        } else {
+            type = "Лк"
+            key_subject = clean_subject
+            gsub(/ DL.*/, "", key_subject)
+            key = key_subject "_" type
+        }
+        
+        if(key in lesson_counters) {
+            if(type != "Лб") {
+                lesson_counters[key]++
+            }
+        } else {
+            if(type == "Лб") {
+                max_num = 0
+                for(k in lesson_counters) {
+                    if(index(k, key_subject "_" type "_") == 1) {
+                        if(lesson_counters[k] > max_num) {
+                            max_num = lesson_counters[k]
+                        }
+                    }
+                }
+                lesson_counters[key] = max_num + 1
+            } else {
+                lesson_counters[key] = 1
+            }
+        }
+        
+        lesson_number = lesson_counters[key]
+        
+        split(start_date, sd_parts, ".")
+        split(end_date, ed_parts, ".")
+        formatted_start_date = sd_parts[2] "/" sd_parts[1] "/" sd_parts[3]
+        formatted_end_date = ed_parts[2] "/" ed_parts[1] "/" ed_parts[3]
+        
+        formatted_start_time = convert_to_12h(start_time)
+        formatted_end_time = convert_to_12h(end_time)
+        
+        subject_output = clean_subject "; №" lesson_number
+        description = clean_subject
+        
+        record = "\"" subject_output "\",\"" formatted_start_date "\",\"" formatted_start_time "\",\"" formatted_end_date "\",\"" formatted_end_time "\",\"" description "\""
+        
+        print record
+    }
+' "$temp_sorted" >> "$output_file"
+
+rm "$temp_filtered" "$temp_sorted"
+
+if [[ $quiet -eq 0 ]]; then
+    cat "$output_file"
+fi
+
+rm "$temp_fixed"

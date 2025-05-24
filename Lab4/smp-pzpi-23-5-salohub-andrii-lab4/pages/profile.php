@@ -39,7 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           'profile_picture' => $profile['profile_picture']
         ];
 
-        if (isset($_FILES['profile_picture']) && $_FILES['profile_picture']['error'] === UPLOAD_ERR_OK) {
+        if (isset($_FILES['profile_picture'])) {
             $upload_dir = __DIR__ . '/../Uploads/';
             if (!is_dir($upload_dir)) {
                 mkdir($upload_dir, 0755, true);
